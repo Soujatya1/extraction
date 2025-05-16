@@ -2,7 +2,6 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 import docx
-import json
 import io
 import os
 import zipfile
@@ -74,34 +73,54 @@ def create_word_document_text_only(document_content):
     
     return docx_io
 
-def create_json_tables(document_content):
+def create_excel_tables(document_content):
     table_content = [item for item in document_content if item["type"] == "table"]
     
-    tables_dict = {}
+    # Create Excel file with multiple sheets (one per table)
+    excel_io = io.BytesIO()
     
-    for item in table_content:
-        df = item["dataframe"]
-        table_data = df.to_dict(orient="records")
-        
-        table_key = f"page_{item['page']}_table_{item['table_number']}"
-        
-        tables_dict[table_key] = {
-            "page": item["page"],
-            "table_number": item["table_number"],
-            "data": table_data
-        }
+    with pd.ExcelWriter(excel_io, engine='xlsxwriter') as writer:
+        for item in table_content:
+            df = item["dataframe"]
+            # Create a unique sheet name for each table
+            sheet_name = f"Page{item['page']}_Table{item['table_number']}"
+            # Excel sheet names can't exceed 31 characters
+            if len(sheet_name) > 31:
+                sheet_name = sheet_name[:31]
+            
+            # If sheet name already exists (rare case), make it unique
+            counter = 1
+            base_sheet_name = sheet_name
+            while sheet_name in writer.sheets:
+                truncate_length = min(len(base_sheet_name) - len(str(counter)) - 1, 30)
+                sheet_name = f"{base_sheet_name[:truncate_length]}_{counter}"
+                counter += 1
+            
+            # Write the dataframe to the Excel sheet
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            
+            # Auto-adjust column widths
+            worksheet = writer.sheets[sheet_name]
+            for i, col in enumerate(df.columns):
+                # Find the maximum length in the column
+                max_len = max(
+                    df[col].astype(str).map(len).max(),  # max length of values
+                    len(str(col))  # length of column name
+                ) + 2  # add a little extra space
+                
+                # Set the column width
+                worksheet.set_column(i, i, max_len)
     
-    json_string = json.dumps(tables_dict, indent=2)
-    
-    return json_string
+    excel_io.seek(0)
+    return excel_io
 
-def create_zip_archive(word_doc, json_data, base_filename):
+def create_zip_archive(word_doc, excel_file, base_filename):
     zip_buffer = io.BytesIO()
     
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
         zip_file.writestr(f"{base_filename}_text.docx", word_doc.getvalue())
         
-        zip_file.writestr(f"{base_filename}_tables.json", json_data)
+        zip_file.writestr(f"{base_filename}_tables.xlsx", excel_file.getvalue())
     
     zip_buffer.seek(0)
     
@@ -161,7 +180,7 @@ if uploaded_file:
     if document_content:
         word_doc = create_word_document_text_only(document_content)
         
-        json_data = create_json_tables(document_content)
+        excel_file = create_excel_tables(document_content)
         
         col1, col2 = st.columns(2)
         
@@ -175,14 +194,14 @@ if uploaded_file:
         
         with col2:
             st.download_button(
-                label="Download Tables as JSON",
-                data=json_data,
-                file_name=f"{uploaded_file.name.split('.')[0]}_tables.json",
-                mime="application/json"
+                label="Download Tables as Excel",
+                data=excel_file,
+                file_name=f"{uploaded_file.name.split('.')[0]}_tables.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         
         base_filename = uploaded_file.name.split('.')[0]
-        zip_buffer = create_zip_archive(word_doc, json_data, base_filename)
+        zip_buffer = create_zip_archive(word_doc, excel_file, base_filename)
         
         st.download_button(
             label="Download All (ZIP)",
