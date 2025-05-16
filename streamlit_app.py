@@ -77,21 +77,16 @@ def create_word_document_text_only(document_content):
 def create_excel_tables(document_content):
     table_content = [item for item in document_content if item["type"] == "table"]
     
-    # Create Excel file with multiple sheets (one per table)
     excel_io = io.BytesIO()
     
-    # Create ExcelWriter object without engine specification
-    # This will use the default engine available (either openpyxl or xlsxwriter)
+
     with pd.ExcelWriter(excel_io) as writer:
         for item in table_content:
             df = item["dataframe"]
-            # Create a unique sheet name for each table
             sheet_name = f"Page{item['page']}_Table{item['table_number']}"
-            # Excel sheet names can't exceed 31 characters
             if len(sheet_name) > 31:
                 sheet_name = sheet_name[:31]
             
-            # If sheet name already exists (rare case), make it unique
             counter = 1
             base_sheet_name = sheet_name
             while sheet_name in writer.sheets:
@@ -99,7 +94,6 @@ def create_excel_tables(document_content):
                 sheet_name = f"{base_sheet_name[:truncate_length]}_{counter}"
                 counter += 1
             
-            # Write the dataframe to the Excel sheet
             df.to_excel(writer, sheet_name=sheet_name, index=False)
     
     excel_io.seek(0)
