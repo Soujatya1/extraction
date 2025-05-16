@@ -5,6 +5,7 @@ import docx
 import io
 import os
 import zipfile
+import xlsxwriter
 
 def extract_tables_from_pdf(file_path):
     document_content = []
