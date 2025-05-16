@@ -5,7 +5,6 @@ import docx
 import io
 import os
 import zipfile
-import xlsxwriter
 
 def extract_tables_from_pdf(file_path):
     document_content = []
@@ -80,7 +79,9 @@ def create_excel_tables(document_content):
     # Create Excel file with multiple sheets (one per table)
     excel_io = io.BytesIO()
     
-    with pd.ExcelWriter(excel_io, engine='xlsxwriter') as writer:
+    # Create ExcelWriter object without engine specification
+    # This will use the default engine available (either openpyxl or xlsxwriter)
+    with pd.ExcelWriter(excel_io) as writer:
         for item in table_content:
             df = item["dataframe"]
             # Create a unique sheet name for each table
@@ -99,18 +100,6 @@ def create_excel_tables(document_content):
             
             # Write the dataframe to the Excel sheet
             df.to_excel(writer, sheet_name=sheet_name, index=False)
-            
-            # Auto-adjust column widths
-            worksheet = writer.sheets[sheet_name]
-            for i, col in enumerate(df.columns):
-                # Find the maximum length in the column
-                max_len = max(
-                    df[col].astype(str).map(len).max(),  # max length of values
-                    len(str(col))  # length of column name
-                ) + 2  # add a little extra space
-                
-                # Set the column width
-                worksheet.set_column(i, i, max_len)
     
     excel_io.seek(0)
     return excel_io
