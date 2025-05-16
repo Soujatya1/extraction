@@ -1,151 +1,199 @@
 import streamlit as st
+import pdfplumber
 import pandas as pd
-import math
-from pathlib import Path
+import docx
+import json
+import io
+import os
+import zipfile
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+def extract_tables_from_pdf(file_path):
+    document_content = []
+    
+    with pdfplumber.open(file_path) as pdf:
+        for page_num, page in enumerate(pdf.pages):
+            text = page.extract_text() or ""
+            if text.strip():
+                document_content.append({
+                    "content": text,
+                    "page": page_num + 1,
+                    "type": "text"
+                })
+            
+            tables = page.extract_tables()
+            for table_num, table in enumerate(tables):
+                if table:
+                    df = pd.DataFrame(table)
+                    
+                    if not df.empty:
+                        headers = []
+                        if len(df.columns) > 0:
+                            if not pd.isna(df.iloc[0]).all() and not all(x is None for x in df.iloc[0]):
+                                headers = [str(h).strip() if h is not None else f"Column_{i}" 
+                                          for i, h in enumerate(df.iloc[0])]
+                                df = df.iloc[1:]
+                            else:
+                                headers = [f"Column_{i}" for i in range(len(df.columns))]
+                        
+                        unique_headers = []
+                        header_counts = {}
+                        
+                        for h in headers:
+                            if h in header_counts:
+                                header_counts[h] += 1
+                                unique_headers.append(f"{h}_{header_counts[h]}")
+                            else:
+                                header_counts[h] = 0
+                                unique_headers.append(h)
+                        
+                        df.columns = unique_headers
+                    
+                    document_content.append({
+                        "page": page_num + 1,
+                        "type": "table",
+                        "table_number": table_num + 1,
+                        "dataframe": df
+                    })
+    
+    return document_content
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+def create_word_document_text_only(document_content):
+    doc = docx.Document()
+    doc.add_heading('PDF Text Content', 0)
+    
+    text_content = [item for item in document_content if item["type"] == "text"]
+    
+    for item in text_content:
+        doc.add_heading(f'Page {item["page"]}', level=1)
+        
+        doc.add_paragraph(item["content"])
+    
+    docx_io = io.BytesIO()
+    doc.save(docx_io)
+    docx_io.seek(0)
+    
+    return docx_io
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+def create_json_tables(document_content):
+    table_content = [item for item in document_content if item["type"] == "table"]
+    
+    tables_dict = {}
+    
+    for item in table_content:
+        df = item["dataframe"]
+        table_data = df.to_dict(orient="records")
+        
+        table_key = f"page_{item['page']}_table_{item['table_number']}"
+        
+        tables_dict[table_key] = {
+            "page": item["page"],
+            "table_number": item["table_number"],
+            "data": table_data
+        }
+    
+    json_string = json.dumps(tables_dict, indent=2)
+    
+    return json_string
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+def create_zip_archive(word_doc, json_data, base_filename):
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr(f"{base_filename}_text.docx", word_doc.getvalue())
+        
+        zip_file.writestr(f"{base_filename}_tables.json", json_data)
+    
+    zip_buffer.seek(0)
+    
+    return zip_buffer
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+st.title("PDF Extractor")
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
-
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
+if uploaded_file:
+    temp_dir = 'temp_pdfs'
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    file_path = f"{temp_dir}/{uploaded_file.name}"
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    
+    with st.spinner("Extracting content from PDF..."):
+        document_content = extract_tables_from_pdf(file_path)
+    
+    text_count = sum(1 for item in document_content if item["type"] == "text")
+    table_count = sum(1 for item in document_content if item["type"] == "table")
+    
+    st.success(f"Successfully extracted {text_count} text sections and {table_count} tables from {uploaded_file.name}")
+    
+    with st.expander("Preview Extracted Content"):
+        st.subheader("Text Content Preview")
+        text_items = [item for item in document_content if item["type"] == "text"]
+        if text_items:
+            for i, item in enumerate(text_items[:2]):
+                st.write(f"**Page {item['page']} - Text**")
+                st.text(item["content"][:300] + ("..." if len(item["content"]) > 300 else ""))
+                if i < min(1, len(text_items) - 1):
+                    st.divider()
+            
+            if len(text_items) > 2:
+                st.write(f"*...and {len(text_items) - 2} more text sections*")
         else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+            st.write("No text content found in the PDF.")
+        
+        st.subheader("Table Content Preview")
+        table_items = [item for item in document_content if item["type"] == "table"]
+        if table_items:
+            for i, item in enumerate(table_items[:2]):
+                st.write(f"**Page {item['page']} - Table {item['table_number']}**")
+                df = item.get("dataframe")
+                if df is not None and not df.empty:
+                    st.dataframe(df)
+                if i < min(1, len(table_items) - 1):
+                    st.divider()
+            
+            if len(table_items) > 2:
+                st.write(f"*...and {len(table_items) - 2} more tables*")
+        else:
+            st.write("No tables found in the PDF.")
+    
+    if document_content:
+        word_doc = create_word_document_text_only(document_content)
+        
+        json_data = create_json_tables(document_content)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.download_button(
+                label="Download Text as Word",
+                data=word_doc,
+                file_name=f"{uploaded_file.name.split('.')[0]}_text.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+        
+        with col2:
+            st.download_button(
+                label="Download Tables as JSON",
+                data=json_data,
+                file_name=f"{uploaded_file.name.split('.')[0]}_tables.json",
+                mime="application/json"
+            )
+        
+        base_filename = uploaded_file.name.split('.')[0]
+        zip_buffer = create_zip_archive(word_doc, json_data, base_filename)
+        
+        st.download_button(
+            label="Download All (ZIP)",
+            data=zip_buffer,
+            file_name=f"{base_filename}_extraction.zip",
+            mime="application/zip"
         )
+    
+    try:
+        os.remove(file_path)
+    except:
+        pass
+else:
+    st.info("Please upload a PDF file to extract its content")
